@@ -1,15 +1,15 @@
-import os
-import uuid
+import os, uuid, json
 import dropbox
 from utils.crypto_aes import aes_encrypt
+from utils.crypto_ecc import encrypt_aes_key
 from utils.file_handler import split_file
 from utils.metadata import load_registry, save_registry
 from config import *
 
-# Initialize Dropbox client
+# Initialize Dropbox
 dbx = dropbox.Dropbox(ACCESS_TOKEN)
 
-def encrypt_and_upload(file_path):
+def encrypt_and_upload_web(file_path):
     filename = os.path.basename(file_path)
     os.makedirs(FRAGMENT_FOLDER, exist_ok=True)
 
@@ -21,41 +21,47 @@ def encrypt_and_upload(file_path):
     fragments = split_file(data, FRAGMENT_SIZE)
     fragments_meta = []
 
-    # Encrypt and upload fragments
+    # Load AES key
+    with open(AES_KEY_FILE, "rb") as f:
+        aes_key = f.read()
+
+    # Encrypt AES key using ECC
+    enc_aes_key, ephemeral_pub_bytes = encrypt_aes_key(aes_key, ECC_PUBLIC_KEY_PATH)
+
+    # Encrypt fragments and upload
     for idx, fragment in enumerate(fragments):
-        encrypted = aes_encrypt(fragment, open(AES_KEY_FILE, "rb").read())
+        encrypted_fragment = aes_encrypt(fragment, aes_key)
         frag_name = f"{uuid.uuid4().hex}.frag"
         local_path = os.path.join(FRAGMENT_FOLDER, frag_name)
-
-        # Save locally
         with open(local_path, "wb") as f:
-            f.write(encrypted)
+            f.write(encrypted_fragment)
 
-        # Upload to Dropbox
         dropbox_path = f"{DROPBOX_FOLDER}/{frag_name}"
         with open(local_path, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
         fragments_meta.append({"index": idx, "name": frag_name})
-        print(f"Uploaded fragment {idx+1}/{len(fragments)}: {frag_name}")
 
-    # Update registry
-    registry = load_registry()
-    registry[filename] = {
+    # Manifest entry
+    manifest_entry = {
         "original_filename": filename,
         "total_fragments": len(fragments_meta),
-        "fragments": fragments_meta
+        "fragments": fragments_meta,
+        "enc_aes_key": enc_aes_key.hex(),
+        "ephemeral_pub": ephemeral_pub_bytes.hex()
     }
+
+    # Load registry, update and save
+    registry = load_registry()
+    registry[filename] = manifest_entry
     save_registry(registry)
 
-    # Upload registry to Dropbox
+    # Encrypt entire manifest
     with open("manifests.json", "rb") as f:
-        dbx.files_upload(f.read(), f"{DROPBOX_FOLDER}/manifests.json", mode=dropbox.files.WriteMode.overwrite)
+        manifest_bytes = f.read()
+    encrypted_manifest = aes_encrypt(manifest_bytes, aes_key)
 
-    print(f"\n✅ File '{filename}' encrypted, fragmented, and uploaded successfully!")
-    return registry[filename]
+    # Upload encrypted manifest to Dropbox
+    dbx.files_upload(encrypted_manifest, f"{DROPBOX_FOLDER}/manifests.json", mode=dropbox.files.WriteMode.overwrite)
 
-# Terminal run
-if __name__ == "__main__":
-    file_path = input("Enter file path to upload: ").strip()
-    encrypt_and_upload(file_path)
+    return filename

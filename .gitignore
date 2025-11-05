@@ -1,0 +1,11 @@
+# Ignore specific folders
+
+downloads/
+fragments/
+fragments_downloaded/
+Keys/
+uploads/
+reconstructed/
+.venv/
+__pycache__/
+.env
